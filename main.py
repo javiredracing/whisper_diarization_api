@@ -323,5 +323,5 @@ async def transcribe(params:TranscribeParams, background_tasks: BackgroundTasks)
     return {"result": "Files processing: " + str(len(params.audio_path) - count)+ ", errors: " +str(count)}
 
 
-if __name__ == "__main__":
-    uvicorn.run(app, port=8080, host='0.0.0.0', log_level="debug")
+# if __name__ == "__main__":
+    # uvicorn.run(app, port=8080, host='0.0.0.0', log_level="debug")
