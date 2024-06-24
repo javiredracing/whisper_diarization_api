@@ -94,7 +94,7 @@ configs = Configs(
     DEVICE = "cuda", #or "cpu"
     WHISPER_MODEL = "large-v3",
     LANGUAGE = None, #None for autodetection
-    DATA_SERVER_URL = "http://0.0.0.0:8000/documents/upload/plainSRT",
+    DATA_SERVER_URL = "http://0.0.0.0:8000/documents/upload/plainSRT/",
     STEMMING = False
 )
 
