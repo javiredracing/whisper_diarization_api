@@ -32,10 +32,10 @@ COPY requirements.txt .
 RUN mkdir venv \
 	&& python -m venv venv \
 	&& . venv/bin/activate \
-	&& pip install -U pip \
-	&& pip install -U setuptools \
-	&& pip install -U wheel \
-	&& pip install --upgrade numpy==1.26 \
+	&& pip install -U --no-cache-dir pip \
+	&& pip install -U --no-cache-dir setuptools \
+	&& pip install -U --no-cache-dir wheel \
+	&& pip install --upgrade --no-cache-dir numpy==1.26.4 \
 	&& pip install Cython \
 	&& pip install --no-cache-dir --requirement requirements.txt
 
