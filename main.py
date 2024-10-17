@@ -6,6 +6,7 @@ import re
 import logging
 
 from fastapi import HTTPException, BackgroundTasks, FastAPI, status
+from contextlib import asynccontextmanager
 from pydantic import BaseModel, ConfigDict
 from typing import List, Any, Dict, Optional
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ from ctc_forced_aligner import (
 import whisperx
 from nemo.collections.asr.models.msdd_models import NeuralDiarizer
 
+
 @dataclass
 class Models:
     whisper_model: Any
@@ -36,21 +38,25 @@ class Models:
     alignment_dictionary: Any
     punct_model: Any
 
+
 @dataclass
 class Configs:
-    TEMP_PATH:str
-    BATCH_SIZE:int
-    DEVICE:str
-    WHISPER_MODEL:str
-    LANGUAGE:str
-    DATA_SERVER_URL:str
-    STEMMING:bool
- 
+    TEMP_PATH: str
+    BATCH_SIZE: int
+    DEVICE: str
+    WHISPER_MODEL: str
+    LANGUAGE: str
+    DATA_SERVER_URL: str
+    STEMMING: bool
+
+
 class TranscribeParams(BaseModel):
     model_config = ConfigDict(extra='forbid')
     configs: Optional[Dict] = None
     audio_path: List[str]
-    
+    token:str
+    metadata: dict = {}
+
 tags_metadata = [
     {
         "name": "processing",
@@ -69,6 +75,15 @@ Return a srt file.
 * Nvidia Nemo (ASR) for splitting and clustering 
 """
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    load_models()
+    Thread(target=transcription_worker, daemon=True).start()
+    yield   #Execution after closing app
+    print("exit")
+
+
 app = FastAPI(
     title="Whisper diarization service",
     description=description,
@@ -76,26 +91,28 @@ app = FastAPI(
     version="1.0.0",
     contact={
         "name": "Javier Fernández",
-        "url": "https://github.com/MahmoudAshraf97/whisper-diarization",
+        #"url": "https://github.com/MahmoudAshraf97/whisper-diarization",
         "email": "jfernandez@iter.es",
     },
     license_info={
         "name": "Apache 2.0",
         "identifier": "MIT",
-    },openapi_tags=tags_metadata)
+    }, openapi_tags=tags_metadata,
+    lifespan=lifespan
+)
 
 trancription_tasks = {}
 trancription_tasks_queue = Queue()
 
 ROOT = '/home/administrador/audio2'
-configs = Configs(    
-    TEMP_PATH = os.path.join(ROOT, "temp_output"),
-    BATCH_SIZE = 32,
-    DEVICE = "cuda", #or "cpu"
-    WHISPER_MODEL = "large-v3",
-    LANGUAGE = None, #None for autodetection
-    DATA_SERVER_URL = "http://0.0.0.0:8000/documents/upload/plainSRT/",
-    STEMMING = False
+configs = Configs(
+    TEMP_PATH=os.path.join(ROOT, "temp_output"),
+    BATCH_SIZE=32,
+    DEVICE="cuda",  #or "cpu"
+    WHISPER_MODEL="large-v3",
+    LANGUAGE=None,  #None for autodetection
+    DATA_SERVER_URL="http://0.0.0.0:8000/documents/upload/plainSRT/",
+    STEMMING=False
 )
 
 models = Models(
@@ -107,18 +124,19 @@ models = Models(
     punct_model=None
 )
 
+
 def load_models():
     #print("loading")
     global models
     global configs
-    
+
     models.whisper_model = whisperx.load_model(
         configs.WHISPER_MODEL,
         configs.DEVICE,
         compute_type="float16" if configs.DEVICE == "cuda" else "int8",
         asr_options={"suppress_numerals": False},
     )
-    models.alignment_model, models.alignment_tokenizer, models.alignment_dictionary = load_alignment_model(
+    models.alignment_model, models.alignment_tokenizer= load_alignment_model(
         configs.DEVICE,
         dtype=torch.float16 if configs.DEVICE == "cuda" else torch.float32,
     )
@@ -126,8 +144,9 @@ def load_models():
     models.punct_model = PunctuationModel(model="kredor/punctuate-all")
     #print("end loading")
 
+
 # Isolate vocals from the rest of the audio
-def stemming(audio_file:str):
+def stemming(audio_file: str):
     vocal_tarjet = audio_file
     global configs
 
@@ -147,24 +166,28 @@ def stemming(audio_file:str):
             os.path.splitext(os.path.basename(audio_file))[0],
             "vocals.wav",
         )
-    
+
     return vocal_target
 
-def transcribe_batched(audio_file:str):
+
+def transcribe_batched(audio_file: str):
     global models
-    
+
     audio = whisperx.load_audio(audio_file)
-    result = models.whisper_model.transcribe(audio, language=configs.LANGUAGE, batch_size=configs.BATCH_SIZE)
-    
+    language = process_language_arg(configs.LANGUAGE, configs.WHISPER_MODEL)
+    result = models.whisper_model.transcribe(audio, language=language, batch_size=configs.BATCH_SIZE)
+
     return result["segments"], result["language"], audio
+
 
 def nemo_process(audio_file, temp_path):
     global models
-    
+
     create_config(temp_path)
     sound = AudioSegment.from_file(audio_file).set_channels(1)
     sound.export(os.path.join(temp_path, "mono_file.wav"), format="wav")
-    models.msdd_model.diarize()    #diarize all in temp_path
+    models.msdd_model.diarize()  #diarize all in temp_path
+
 
 def diarize(audio_file):
     global configs
@@ -176,16 +199,17 @@ def diarize(audio_file):
         vocal_target = stemming(vocal_target)
     proc = Thread(target=nemo_process, args=(vocal_target, configs.TEMP_PATH))
     proc.start()
-    
+
     whisper_results, language, audio_waveform = transcribe_batched(vocal_target)
-    audio_waveform = (torch.from_numpy(audio_waveform).to(models.alignment_model.dtype).to(models.alignment_model.device))
+    audio_waveform = (
+        torch.from_numpy(audio_waveform).to(models.alignment_model.dtype).to(models.alignment_model.device))
     emissions, stride = generate_emissions(models.alignment_model, audio_waveform, batch_size=configs.BATCH_SIZE)
     full_transcript = "".join(segment["text"] for segment in whisper_results)
     #print(full_transcript)
-    tokens_starred, text_starred = preprocess_text(full_transcript, romanize=True, language=langs_to_iso[language],)
-    
-    segments, scores, blank_id = get_alignments(emissions, tokens_starred, models.alignment_dictionary,)
-    spans = get_spans(tokens_starred, segments, models.alignment_tokenizer.decode(blank_id))
+    tokens_starred, text_starred = preprocess_text(full_transcript, romanize=True, language=langs_to_iso[language], )
+
+    segments, scores, blank_token  = get_alignments(emissions, tokens_starred, models.alignment_tokenizer, )
+    spans = get_spans(tokens_starred, segments, blank_token)
     word_timestamps = postprocess_results(text_starred, spans, stride, scores)
     #print("waiting...")
     proc.join()  #wait for nemo process
@@ -200,9 +224,9 @@ def diarize(audio_file):
             speaker_ts.append([s, e, int(line_list[11].split("_")[-1])])
 
     wsm = get_words_speaker_mapping(word_timestamps, speaker_ts, "start")
-    
+
     if language in punct_model_langs:
-    # restoring punctuation in the transcript to help realign the sentences
+        # restoring punctuation in the transcript to help realign the sentences
 
         words_list = list(map(lambda x: x["word"], wsm))
 
@@ -217,9 +241,9 @@ def diarize(audio_file):
         for word_dict, labeled_tuple in zip(wsm, labled_words):
             word = word_dict["word"]
             if (
-                word
-                and labeled_tuple[1] in ending_puncts
-                and (word[-1] not in model_puncts or is_acronym(word))
+                    word
+                    and labeled_tuple[1] in ending_puncts
+                    and (word[-1] not in model_puncts or is_acronym(word))
             ):
                 word += labeled_tuple[1]
                 if word.endswith(".."):
@@ -235,33 +259,38 @@ def diarize(audio_file):
     ssm = get_sentences_speaker_mapping(wsm, speaker_ts)
 
     # with open(f"{os.path.splitext(vocal_target)[0]}.txt", "w", encoding="utf-8-sig") as f:    
-        # get_speaker_aware_transcript(ssm, f)
+    # get_speaker_aware_transcript(ssm, f)
 
     # with open(f"{os.path.splitext(vocal_target)[0]}1.srt", "w", encoding="utf-8-sig") as srt:
-       # write_srt(ssm, srt)
+    # write_srt(ssm, srt)
 
     cleanup(configs.TEMP_PATH)
     cleanup(audio_file)
     return getPlainSRT(ssm)
 
-def send_results(plain_text:str, metadata:dict, file_path:str):
+
+def send_results(plain_text: str, metadata: dict, file_path: str, token:str):
     global configs
 
     try:
-        req = requests.post(configs.DATA_SERVER_URL, json={"text": plain_text.replace("\"", "\'"), "metadata": metadata, "filename":os.path.basename(file_path)})  #encode texts semantic search api
+        req = requests.post(configs.DATA_SERVER_URL, json={"text": plain_text.replace("\"", "\'"), "token":token, "metadata": metadata,
+                                                           "filename": os.path.basename(
+                                                               file_path)})  #encode texts semantic search api
         req.raise_for_status()
     except requests.exceptions.RequestException as e:
-        print("ERROR! "+ str(e))
+        print("ERROR! " + str(e))
         with open(f"{os.path.splitext(file_path)[0]}.srt", "w", encoding="utf-8-sig") as srt:
             srt.write(plain_text)
 
+
 def transcription_worker() -> None:
     while True:
-        audio_file = trancription_tasks_queue.get()
-        filename = os.path.basename(audio_file)
+        current_params:dict = trancription_tasks_queue.get()
+        audio_file = current_params["file_path"]
+        filename = os.path.basename(current_params["file_path"])
         try:
             result = diarize(audio_file)
-            send_results(result, {}, audio_file)
+            send_results(result, current_params.get("metadata",{}), audio_file, current_params.get("token"))
             trancription_tasks[filename].update({"status": "completed", "result": result})
 
         except Exception as e:
@@ -271,20 +300,24 @@ def transcription_worker() -> None:
             trancription_tasks_queue.task_done()
             #os.remove(tmp_path)
 
+
 async def cleanup_task(task_id: str) -> None:
     await asyncio.sleep(60 * 60)
     trancription_tasks.pop(task_id, None)
 
-@app.on_event("startup")
-async def start_queue():
-    load_models()
-    Thread(target=transcription_worker, daemon=True).start()
 
-@app.get("/status",tags=["status"])
+# @app.on_event("startup")
+# async def start_queue():
+#     load_models()
+#     Thread(target=transcription_worker, daemon=True).start()
+
+
+@app.get("/status/", tags=["status"])
 async def status() -> dict:
     return trancription_tasks
 
-@app.get("/status/{audio_file}",tags=["status"])
+
+@app.get("/status/{audio_file}", tags=["status"])
 async def get_task_status(audio_file: str) -> dict:
     task = trancription_tasks.get(audio_file)
     if not task:
@@ -296,8 +329,9 @@ async def get_task_status(audio_file: str) -> dict:
         "status": task["status"]
     }
 
-@app.post("/transcribe", tags=["processing"])
-async def transcribe(params:TranscribeParams, background_tasks: BackgroundTasks):
+
+@app.post("/transcribe/", tags=["processing"])
+async def transcribe(params: TranscribeParams, background_tasks: BackgroundTasks):
     '''
     Transcribe audio file to srt file. Admit an absolute path where the audio file is located.
     '''
@@ -313,11 +347,10 @@ async def transcribe(params:TranscribeParams, background_tasks: BackgroundTasks)
             }
             #validate configs
             trancription_tasks[filename].update({"status": "processing"})
-            trancription_tasks_queue.put(file_path)
+            trancription_tasks_queue.put({"file_path":file_path, "token":params.token, "metadata":params.metadata})
 
             background_tasks.add_task(cleanup_task, filename)
         else:
             count += 1
 
-    return {"result": "Files processing: " + str(len(params.audio_path) - count)+ ", errors: " +str(count)}
-
+    return {"result": "Files processing: " + str(len(params.audio_path) - count) + ", errors: " + str(count)}
