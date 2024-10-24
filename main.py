@@ -111,7 +111,7 @@ ROOT = '/home/administrador/audio2'
 configs = Configs(
     TEMP_PATH=os.path.join(ROOT, "temp_output"),
     BATCH_SIZE=32,
-    DEVICE="cuda",  #"cuda" if torch.cuda.is_available() else "cpu"
+    DEVICE="cuda" if torch.cuda.is_available() else "cpu",
     WHISPER_MODEL="deepdml/faster-whisper-large-v3-turbo-ct2", #large-v3",
     LANGUAGE="es",  #None for autodetection
     DATA_SERVER_URL="http://0.0.0.0:8000/documents/upload/plainSRT/",
@@ -239,7 +239,7 @@ def diarize(audio_file):
     word_timestamps = postprocess_results(text_starred, spans, stride, scores)
     #print("waiting...")
     proc.join()  #wait for nemo process
-    # models.msdd_model.diarize()  # diarize all in temp_path
+
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
@@ -358,8 +358,8 @@ async def get_task_status(audio_file: str) -> dict:
     }
 
 
-@app.post("/transcribe_uri/", tags=["processing"])
-async def transcribe_from_uri(params: TranscribeParams, background_tasks: BackgroundTasks):
+@app.post("/transcribe/", tags=["processing"])
+async def transcribe(params: TranscribeParams, background_tasks: BackgroundTasks):
     '''
     Transcribe audio file to srt file. Admit an absolute path where the audio file is located or a URL file
     '''
