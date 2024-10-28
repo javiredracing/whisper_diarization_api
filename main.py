@@ -1,4 +1,4 @@
-import os
+#import os
 import asyncio
 from threading import Thread
 import time
@@ -6,10 +6,10 @@ from queue import Queue
 import re
 import logging
 
-from fastapi import HTTPException, BackgroundTasks, FastAPI, status
+from fastapi import HTTPException, BackgroundTasks, FastAPI#, status
 from contextlib import asynccontextmanager
-from pydantic import BaseModel, ConfigDict, ValidationError, HttpUrl
-from typing import List, Any, Dict, Optional
+from pydantic import BaseModel, ConfigDict
+from typing import List, Any, Optional
 from dataclasses import dataclass
 from datetime import datetime
 import requests
@@ -48,17 +48,15 @@ class Configs:
     BATCH_SIZE: int
     DEVICE: str
     WHISPER_MODEL: str
-    LANGUAGE: str
     DATA_SERVER_URL: str
-    STEMMING: bool
-
 
 class TranscribeParams(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    configs: Optional[Dict] = None
-    audio_path: List[str]
     token:str
-    metadata: dict = {}
+    audio_path: List[str]
+    metadata:Optional[dict] = {}
+    language:Optional[str] = "es"
+    stemming:Optional[bool] = False
 
 tags_metadata = [
     {
@@ -113,9 +111,7 @@ configs = Configs(
     BATCH_SIZE=32,
     DEVICE="cuda" if torch.cuda.is_available() else "cpu",
     WHISPER_MODEL="deepdml/faster-whisper-large-v3-turbo-ct2", #large-v3",
-    LANGUAGE="es",  #None for autodetection
     DATA_SERVER_URL="http://0.0.0.0:8000/documents/upload/plainSRT/",
-    STEMMING=False
 )
 
 models = Models(
@@ -126,7 +122,6 @@ models = Models(
     alignment_dictionary=None,
     punct_model=None
 )
-
 
 def load_models():
     #print("loading")
@@ -171,16 +166,6 @@ def stemming(audio_file: str):
     return vocal_target
 
 
-# def transcribe_batched(audio_file: str):
-#     global models
-
-    # audio = whisperx.load_audio(audio_file)
-    # language = process_language_arg(configs.LANGUAGE, configs.WHISPER_MODEL)
-    # result = models.whisper_model.transcribe(audio, language=language, batch_size=configs.BATCH_SIZE)
-    #
-    # return result["segments"], result["language"], audio
-
-
 def nemo_process(audio_waveform, temp_path):
     global models
 
@@ -196,23 +181,23 @@ def nemo_process(audio_waveform, temp_path):
     )
     models.msdd_model.diarize()  # diarize all in temp_path
 
-def diarize(audio_file):
+def diarize(audio_file:str, lang:str, is_stemming:bool):
     global configs
     global models
-    inicio = time.time()
+    #inicio = time.time()
     os.makedirs(configs.TEMP_PATH, exist_ok=True)
     vocal_target = audio_file
-    if configs.STEMMING:
+    if is_stemming:
         vocal_target = stemming(vocal_target)
     # proc = Thread(target=nemo_process, args=(vocal_target, configs.TEMP_PATH))
     # proc.start()
 
-    language = process_language_arg(configs.LANGUAGE, configs.WHISPER_MODEL)
-
+    language = process_language_arg(lang, configs.WHISPER_MODEL)
 
     audio_waveform = faster_whisper.decode_audio(vocal_target)
     proc = Thread(target=nemo_process, args=(audio_waveform, configs.TEMP_PATH))
     proc.start()
+
     transcript_segments, info = models.whisper_pipeline.transcribe(
         audio_waveform,
         language,
@@ -224,6 +209,7 @@ def diarize(audio_file):
     full_transcript = "".join(segment.text for segment in transcript_segments)
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+
     tokens_starred, text_starred = preprocess_text(full_transcript, romanize=True, language=langs_to_iso[info.language], )
 
     emissions, stride = generate_emissions(
@@ -233,6 +219,7 @@ def diarize(audio_file):
     )
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+
     segments, scores, blank_token  = get_alignments(emissions, tokens_starred, models.alignment_tokenizer, )
 
     spans = get_spans(tokens_starred, segments, blank_token)
@@ -293,29 +280,29 @@ def diarize(audio_file):
 
     # with open(f"{os.path.splitext(vocal_target)[0]}1.srt", "w", encoding="utf-8-sig") as srt:
     # write_srt(ssm, srt)
-    fin = time.time()
-    tiempo_ejecucion = fin - inicio
-    print(f"Tiempo de ejecución: {tiempo_ejecucion} segundos")
+    # fin = time.time()
+    # tiempo_ejecucion = fin - inicio
+    # print(f"Tiempo de ejecución: {tiempo_ejecucion} segundos")
     cleanup(configs.TEMP_PATH)  #comment for get embeddings
-    #cleanup(audio_file)
+    cleanup(audio_file)
     return getPlainSRT(ssm)
 
 
 def send_results(plain_text: str, metadata: dict, file_path: str, token:str):
     global configs
 
-    # try:
-    #     req = requests.post(configs.DATA_SERVER_URL, json={"text": plain_text.replace("\"", "\'"), "token":token, "metadata": metadata,
-    #                                                        "filename": os.path.basename(
-    #                                                            file_path)})  #encode texts semantic search api
-    #     req.raise_for_status()
-    # except requests.exceptions.RequestException as e:
-    #     print("ERROR! " + str(e))
-    #     with open(f"{os.path.splitext(file_path)[0]}.srt", "w", encoding="utf-8-sig") as srt:
-    #         srt.write(plain_text)
+    try:
+        req = requests.post(configs.DATA_SERVER_URL, json={"text": plain_text.replace("\"", "\'"), "token":token, "metadata": metadata,
+                                                           "filename": os.path.basename(
+                                                               file_path)})  #encode texts semantic search api
+        req.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        print("ERROR! " + str(e))
+        with open(f"{os.path.splitext(file_path)[0]}.srt", "w", encoding="utf-8-sig") as srt:
+            srt.write(plain_text)
 
-    with open(f"{os.path.splitext(file_path)[0]}.srt", "w", encoding="utf-8-sig") as srt:
-        srt.write(plain_text)
+    # with open(f"{os.path.splitext(file_path)[0]}.srt", "w", encoding="utf-8-sig") as srt:
+    #     srt.write(plain_text)
 
 def transcription_worker() -> None:
     while True:
@@ -323,11 +310,12 @@ def transcription_worker() -> None:
         audio_file = current_params["file_path"]
         filename = os.path.basename(current_params["file_path"])
         try:
-            result = diarize(audio_file)
+            result = diarize(audio_file,current_params.get("language","es"),current_params.get("stemming",False))
             send_results(result, current_params.get("metadata",{}), audio_file, current_params.get("token"))
             trancription_tasks[filename].update({"status": "completed", "result": result})
 
         except Exception as e:
+            print("Failed:",str(e))
             trancription_tasks[filename].update({"status": "failed", "result": str(e)})
 
         finally:
@@ -361,7 +349,12 @@ async def get_task_status(audio_file: str) -> dict:
 @app.post("/transcribe/", tags=["processing"])
 async def transcribe(params: TranscribeParams, background_tasks: BackgroundTasks):
     '''
-    Transcribe audio file to srt file. Admit an absolute path where the audio file is located or a URL file
+    Transcribe audio file to srt file. Admit an absolute path where the audio file is located or a URL file.
+    - token: Necessary token for sending to database
+    - audio_path : List of existing full path audios or accesible from server url.
+    - metadata: Json with custom metadata. (Optional, default empty json)
+    - language: Current audio language.(Optional, default "es")
+    - stemming: True if is a audio music, false otherwise. It separates music signal of vocal. (Optional, default False)
     '''
     valid_files = process_list(params.audio_path)
     errors_count = len(params.audio_path) - len(valid_files)
@@ -376,10 +369,9 @@ async def transcribe(params: TranscribeParams, background_tasks: BackgroundTasks
         }
         #validate configs
         trancription_tasks[filename].update({"status": "processing"})
-        trancription_tasks_queue.put({"file_path":file_path, "token":params.token, "metadata":params.metadata})
+        trancription_tasks_queue.put({"file_path":file_path, "token":params.token, "metadata":params.metadata,
+                                      "language":params.language, "stemming":params.stemming})
 
         background_tasks.add_task(cleanup_task, filename)
-
-
 
     return {"result": "Files processing: " + str(len(valid_files)) + ", errors: " + str(errors_count)}
