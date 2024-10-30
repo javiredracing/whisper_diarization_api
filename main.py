@@ -184,13 +184,11 @@ def nemo_process(audio_waveform, temp_path):
 def diarize(audio_file:str, lang:str, is_stemming:bool):
     global configs
     global models
-    #inicio = time.time()
+    inicio = time.time()
     os.makedirs(configs.TEMP_PATH, exist_ok=True)
     vocal_target = audio_file
     if is_stemming:
         vocal_target = stemming(vocal_target)
-    # proc = Thread(target=nemo_process, args=(vocal_target, configs.TEMP_PATH))
-    # proc.start()
 
     language = process_language_arg(lang, configs.WHISPER_MODEL)
 
@@ -207,9 +205,8 @@ def diarize(audio_file:str, lang:str, is_stemming:bool):
     )
 
     full_transcript = "".join(segment.text for segment in transcript_segments)
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
+    # if torch.cuda.is_available():
+    #     torch.cuda.empty_cache()
     tokens_starred, text_starred = preprocess_text(full_transcript, romanize=True, language=langs_to_iso[info.language], )
 
     emissions, stride = generate_emissions(
@@ -217,9 +214,8 @@ def diarize(audio_file:str, lang:str, is_stemming:bool):
         audio_waveform.to(models.alignment_model.dtype).to(models.alignment_model.device),
         batch_size=configs.BATCH_SIZE,
     )
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
+    # if torch.cuda.is_available():
+    #     torch.cuda.empty_cache()
     segments, scores, blank_token  = get_alignments(emissions, tokens_starred, models.alignment_tokenizer, )
 
     spans = get_spans(tokens_starred, segments, blank_token)
@@ -280,9 +276,11 @@ def diarize(audio_file:str, lang:str, is_stemming:bool):
 
     # with open(f"{os.path.splitext(vocal_target)[0]}1.srt", "w", encoding="utf-8-sig") as srt:
     # write_srt(ssm, srt)
-    # fin = time.time()
-    # tiempo_ejecucion = fin - inicio
-    # print(f"Tiempo de ejecución: {tiempo_ejecucion} segundos")
+    fin = time.time()
+    tiempo_ejecucion = fin - inicio
+    logging.info(
+        f"Transcription time of {audio_file}: {tiempo_ejecucion} seconds"
+    )
     cleanup(configs.TEMP_PATH)  #comment for get embeddings
     cleanup(audio_file)
     return getPlainSRT(ssm)

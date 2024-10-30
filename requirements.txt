@@ -2,7 +2,7 @@ cython
 numpy==1.26.4
 wget
 nemo_toolkit[asr]==2.0.0rc1
-ctranslate2==4.4.0
+#ctranslate2==4.4.0
 git+https://github.com/SYSTRAN/faster-whisper.git
 git+https://github.com/MahmoudAshraf97/demucs.git
 git+https://github.com/oliverguhr/deepmultilingualpunctuation.git
