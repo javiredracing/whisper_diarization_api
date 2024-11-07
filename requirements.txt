@@ -11,3 +11,4 @@ IPython
 fastapi[standard]
 
 #sudo apt install nvidia-cudnn
+validators~=0.34.0
