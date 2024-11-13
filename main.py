@@ -49,6 +49,7 @@ class Configs:
     BATCH_SIZE: int
     DEVICE: str
     WHISPER_MODEL: str
+    TIME_TO_REMOVE: int
 
 @dataclass
 class ReturnMessage:
@@ -63,9 +64,12 @@ class TranscriptionResponse(BaseModel):
 
 @dataclass
 class TranscriptionStatus(BaseModel):
-    file_name: str
+    file_name:str
     creation_time: datetime
-    status: str
+    status:str
+    result:list[str]
+    def __init__(self, file_name: str, creation_time: datetime, current_status:str, result:list[str]) -> None:
+        super().__init__(file_name=file_name, creation_time=creation_time,status=current_status, result=result)
 
 class Webhook(BaseModel):
     url: Optional[HttpUrl]
@@ -148,7 +152,7 @@ configs = Configs(
     BATCH_SIZE=32,
     DEVICE="cuda" if torch.cuda.is_available() else "cpu",
     WHISPER_MODEL="deepdml/faster-whisper-large-v3-turbo-ct2",  #large-v3",
-    #DATA_SERVER_URL="http://0.0.0.0:8000/documents/upload/plainSRT/",
+    TIME_TO_REMOVE=259200 #3 days in seconds: 60 x 60 x 24 x 3
 )
 
 models = Models(
@@ -332,12 +336,14 @@ def diarize(audio_file: str, lang: str, is_stemming: bool) -> str:
 def send_results(plain_text: str, metadata: dict, file_path: str, token: str, url: str) -> None:
     global configs
     #print(url, token, metadata)
+    filename = os.path.basename(file_path)
     try:
         req = requests.post(url, json={"text": plain_text.replace("\"", "\'"), "token": token, "metadata": metadata,
-                                       "filename": os.path.basename(file_path)})  #encode texts semantic search api
+                                       "filename": filename})  #encode texts semantic search api
         req.raise_for_status()
     except requests.exceptions.RequestException as e:
-        print("ERROR! " + str(e))
+        #print("ERROR! " + str(e))
+        logging.warning(f"Error sending {filename}: {str(e)}")
         #write_srt(plain_text, file_path)
 
 
@@ -347,16 +353,22 @@ def transcription_worker() -> None:
         audio_file = current_params["file_path"]
         filename = os.path.basename(current_params["file_path"])
         try:
+            current_status: TranscriptionStatus = trancription_tasks[filename]
+            current_status.status = "Transcribing..."
             result = diarize(audio_file, current_params.get("language", "es"), current_params.get("stemming", False))
             webhook = current_params.get("webhook")
             if webhook is not None:
                 send_results(result, webhook.metadata, audio_file, webhook.token, webhook.url)
+            file_result = f"{STATIC_ROUTE}/{os.path.splitext(filename)[0]}"
 
-            trancription_tasks[filename].update({"status": "completed", "result": f"{STATIC_ROUTE}/{os.path.splitext(filename)[0]}.srt"})
+            current_status.status = "completed"
+            current_status.result= [file_result +".srt",file_result+".txt"]
 
         except Exception as e:
-            print("Failed:", str(e))
-            trancription_tasks[filename].update({"status": "failed", "result": str(e)})
+            #print("Failed:", str(e))
+            logging.error("Failed: " + str(e))
+            current_status:TranscriptionStatus = trancription_tasks[filename]
+            current_status.status="Failed:" + str(e)
 
         finally:
             trancription_tasks_queue.task_done()
@@ -364,8 +376,16 @@ def transcription_worker() -> None:
 
 
 async def cleanup_task(task_id: str) -> None:
-    await asyncio.sleep(60 * 60)
+    """
+    Remove task in queue and file in static directory
+    """
+    global  configs
+    await asyncio.sleep(configs.TIME_TO_REMOVE)
     trancription_tasks.pop(task_id, None)
+    basename_file = os.path.splitext(task_id)[0]
+    output_path = os.path.join(STATIC_PATH, basename_file)
+    cleanup(output_path + ".srt")
+    cleanup(output_path + ".txt")
 
 
 @app.get("/status/", tags=["status"])
@@ -382,11 +402,10 @@ async def get_task_status(audio_file: str) -> TranscriptionStatus:
     Get status of an audio file in process.
     - audio_file: filename with extension of an audio file
     """
-    task = trancription_tasks.get(audio_file)
+    task:TranscriptionStatus = trancription_tasks.get(audio_file)
     if not task:
         raise HTTPException(status_code=404, detail="Audio file not found!")
-
-    return TranscriptionStatus(file_name= audio_file, creation_time=task["creation_time"], status=task["status"])
+    return task
 
 @app.post("/transcribe_uri/", tags=["processing"])
 async def transcribe_uri(params: TranscribeParamsUri, background_tasks: BackgroundTasks) -> ReturnMessage:
@@ -404,23 +423,20 @@ async def transcribe_uri(params: TranscribeParamsUri, background_tasks: Backgrou
     #TODO validate audio format (mp3, wav,)
     valid_files = process_list(params.audio_uri)
     errors_count = len(params.audio_uri) - len(valid_files)
-
+    valid_files_names = []
     for file_path in valid_files:
         #print("Queueing a job")
         filename = os.path.basename(file_path)
-        trancription_tasks[filename] = {
-            "status": "loading",
-            "creation_time": datetime.now(),
-            "result": None
-        }
+        valid_files_names.append(filename)
+        trancription_tasks[filename] = TranscriptionStatus(file_name= filename, creation_time=datetime.now(), current_status="Enqueued", result=[])
         #validate configs
-        trancription_tasks[filename].update({"status": "processing"})
         trancription_tasks_queue.put({"file_path": file_path, "webhook": params.webhook,
                                       "language": params.language, "stemming": params.stemming})
 
         background_tasks.add_task(cleanup_task, filename)
 
-    return ReturnMessage(message="Files processing: " + str(len(valid_files)) + ", errors: " + str(errors_count))
+    valid_file_names = "".join(valid_files_names)
+    return ReturnMessage(message=f"Processing {str(len(valid_files))} files: {valid_file_names}, Files wrong: {str(errors_count)}")
 
 
 @app.post("/transcribe/", tags=["processing"])
@@ -439,23 +455,22 @@ def transcribe_audio_file(background_tasks: BackgroundTasks, params:TranscribePa
     """
     # https://stackoverflow.com/questions/65504438/how-to-add-both-file-and-json-body-in-a-fastapi-post-request
     valid_files = upload_files_concurrently(files)
-
+    valid_files_names = []
     for file_path in valid_files:
         #print("Queueing a job")
         filename = os.path.basename(file_path)
-        trancription_tasks[filename] = {
-            "status": "loading",
-            "creation_time": datetime.now(),
-            "result": None
-        }
+        valid_files_names.append(filename)
         #validate configs
-        trancription_tasks[filename].update({"status": "processing"})
+        trancription_tasks[filename] = TranscriptionStatus(file_name=filename, creation_time=datetime.now(),
+                                                           current_status="Enqueued", result=[])
+
         trancription_tasks_queue.put({"file_path": file_path, "webhook": params.webhook,
                                       "language": params.language, "stemming": params.stemming})
 
         background_tasks.add_task(cleanup_task, filename)
 
-    return ReturnMessage(message="Files processing: " + str(len(valid_files)) + ", errors: " + str(len(files) - len(valid_files)))
+    valid_file_names = "".join(valid_files_names)
+    return ReturnMessage(message=f"Processing {str(len(valid_files))} files: {valid_file_names}, Files wrong: {str(len(files) - len(valid_files))}")
 
 @app.webhooks.post("transcription_response")
 def new_transcription(body: TranscriptionResponse):
