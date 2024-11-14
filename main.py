@@ -14,11 +14,11 @@ from typing import Any, Optional, List
 from dataclasses import dataclass
 from datetime import datetime
 import requests
+from starlette.responses import RedirectResponse
 
 from helpers import *
 import torch
 import torchaudio
-#from pydub import AudioSegment
 from deepmultilingualpunctuation import PunctuationModel
 from ctc_forced_aligner import (
     generate_emissions,
@@ -58,21 +58,17 @@ class ReturnMessage:
 
 class TranscriptionResponse(BaseModel):
     text: str
-    file_name: FilePath
+    filename: str
     metadata: dict
     token: str
 
-@dataclass
 class TranscriptionStatus(BaseModel):
-    file_name:str
     creation_time: datetime
     status:str
     result:list[str]
-    def __init__(self, file_name: str, creation_time: datetime, current_status:str, result:list[str]) -> None:
-        super().__init__(file_name=file_name, creation_time=creation_time,status=current_status, result=result)
 
 class Webhook(BaseModel):
-    url: Optional[HttpUrl]
+    url: HttpUrl
     metadata: Optional[dict] = {}
     token: Optional[str] = ""
     model_config = ConfigDict(extra='forbid')
@@ -317,9 +313,7 @@ def diarize(audio_file: str, lang: str, is_stemming: bool) -> str:
 
     fin = time.time()
     tiempo_ejecucion = fin - inicio
-    logging.info(
-        f"Transcription time of {audio_file}: {tiempo_ejecucion} seconds"
-    )
+    logging.info(f"Transcription time of {audio_file}: {tiempo_ejecucion} seconds")
 
     output_path = os.path.join(STATIC_PATH, os.path.basename(vocal_target))
     with open(f"{os.path.splitext(output_path)[0]}.txt", "w", encoding="utf-8-sig") as f:
@@ -333,19 +327,21 @@ def diarize(audio_file: str, lang: str, is_stemming: bool) -> str:
     return getPlainSRT(ssm)
 
 
-def send_results(plain_text: str, metadata: dict, file_path: str, token: str, url: str) -> None:
+def send_results(plain_text: str, file_path: str, webhook:Webhook) -> bool:
     global configs
     #print(url, token, metadata)
     filename = os.path.basename(file_path)
     try:
-        req = requests.post(url, json={"text": plain_text.replace("\"", "\'"), "token": token, "metadata": metadata,
-                                       "filename": filename})  #encode texts semantic search api
+        payload = TranscriptionResponse(text=plain_text.replace("\"", "\'"), filename=filename,token=webhook.token,metadata=webhook.metadata)
+        #req = requests.post(webhook.url, json={"text": plain_text.replace("\"", "\'"), "token": webhook.token, "metadata": webhook.metadata, "filename": filename})
+        req = requests.post(webhook.url, json=payload.model_dump())
         req.raise_for_status()
     except requests.exceptions.RequestException as e:
         #print("ERROR! " + str(e))
         logging.warning(f"Error sending {filename}: {str(e)}")
-        #write_srt(plain_text, file_path)
+        return False
 
+    return True
 
 def transcription_worker() -> None:
     while True:
@@ -356,13 +352,22 @@ def transcription_worker() -> None:
             current_status: TranscriptionStatus = trancription_tasks[filename]
             current_status.status = "Transcribing..."
             result = diarize(audio_file, current_params.get("language", "es"), current_params.get("stemming", False))
-            webhook = current_params.get("webhook")
-            if webhook is not None:
-                send_results(result, webhook.metadata, audio_file, webhook.token, webhook.url)
-            file_result = f"{STATIC_ROUTE}/{os.path.splitext(filename)[0]}"
+            if result is not None and len(result) > 0:
+                current_status.status = "Completed"
+                file_result = f"{STATIC_ROUTE}/{os.path.splitext(filename)[0]}"
+                current_status.result= [file_result +".srt",file_result+".txt"]
 
-            current_status.status = "completed"
-            current_status.result= [file_result +".srt",file_result+".txt"]
+                webhook:Webhook = current_params.get("webhook")
+                if webhook is not None:
+                    srt_filename= os.path.splitext(filename)[0] + ".srt"
+                    was_sent = send_results(result, srt_filename, webhook)
+                    if was_sent:
+                        current_status.status = "Completed | Sending successfully"
+                    else:
+                        current_status.status = "Completed | Sending fails"
+
+            else:
+                current_status.status = "Failed"
 
         except Exception as e:
             #print("Failed:", str(e))
@@ -387,6 +392,9 @@ async def cleanup_task(task_id: str) -> None:
     cleanup(output_path + ".srt")
     cleanup(output_path + ".txt")
 
+@app.get("/", include_in_schema=False)
+def main():
+    return RedirectResponse(url='/docs')
 
 @app.get("/status/", tags=["status"])
 async def status() -> dict:
@@ -428,7 +436,7 @@ async def transcribe_uri(params: TranscribeParamsUri, background_tasks: Backgrou
         #print("Queueing a job")
         filename = os.path.basename(file_path)
         valid_files_names.append(filename)
-        trancription_tasks[filename] = TranscriptionStatus(file_name= filename, creation_time=datetime.now(), current_status="Enqueued", result=[])
+        trancription_tasks[filename] = TranscriptionStatus(creation_time=datetime.now(), status="Enqueued", result=[])
         #validate configs
         trancription_tasks_queue.put({"file_path": file_path, "webhook": params.webhook,
                                       "language": params.language, "stemming": params.stemming})
@@ -440,7 +448,7 @@ async def transcribe_uri(params: TranscribeParamsUri, background_tasks: Backgrou
 
 
 @app.post("/transcribe/", tags=["processing"])
-def transcribe_audio_file(background_tasks: BackgroundTasks, params:TranscribeParams=Body(...), files:List[UploadFile]=File(description="files")) -> ReturnMessage:
+def transcribe_audio_file(background_tasks: BackgroundTasks,  files:List[UploadFile]=File(description="Files to transcribe"), params:TranscribeParams=Body(...)) -> ReturnMessage:
     """
     Transcribe audio files in **.mp3** or **.wav** into a .srt format.
     `TODO: Add support for other audio formats.`
@@ -461,8 +469,7 @@ def transcribe_audio_file(background_tasks: BackgroundTasks, params:TranscribePa
         filename = os.path.basename(file_path)
         valid_files_names.append(filename)
         #validate configs
-        trancription_tasks[filename] = TranscriptionStatus(file_name=filename, creation_time=datetime.now(),
-                                                           current_status="Enqueued", result=[])
+        trancription_tasks[filename] = TranscriptionStatus(creation_time=datetime.now(), status="Enqueued", result=[])
 
         trancription_tasks_queue.put({"file_path": file_path, "webhook": params.webhook,
                                       "language": params.language, "stemming": params.stemming})
@@ -475,7 +482,6 @@ def transcribe_audio_file(background_tasks: BackgroundTasks, params:TranscribePa
 @app.webhooks.post("transcription_response")
 def new_transcription(body: TranscriptionResponse):
     """
-    When a user send a audio to transcribe, this service will send back a POST request with this
-    data to the URL that user provided in the transcribe webhook parameter settings.
+    It will send the srt transcription in plain text of the audio file  in a POST request to the URL that user provided in the transcribe webhook parameter settings.
     """
     pass
