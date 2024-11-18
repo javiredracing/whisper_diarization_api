@@ -55,7 +55,6 @@ class Configs:
 class ReturnMessage:
     message:str
 
-
 class TranscriptionResponse(BaseModel):
     text: str
     filename: str
@@ -73,7 +72,6 @@ class Webhook(BaseModel):
     token: Optional[str] = ""
     model_config = ConfigDict(extra='forbid')
 
-
 class TranscribeParams(BaseModel):
     model_config = ConfigDict(extra='forbid')
     language: Optional[str] = "es"
@@ -86,12 +84,10 @@ class TranscribeParams(BaseModel):
             return cls(**json.loads(value))
         return value
 
-
 class TranscribeParamsUri(TranscribeParams):
     audio_uri: list[FilePath | FileUrl]
 
 logging.getLogger().setLevel(logging.INFO)
-
 tags_metadata = [
     {
         "name": "processing",
@@ -142,7 +138,6 @@ app.mount(STATIC_ROUTE, StaticFiles(directory=STATIC_PATH), name="static")
 trancription_tasks = {}
 trancription_tasks_queue = Queue()
 
-
 configs = Configs(
     TEMP_PATH=os.path.join(AUDIO_PATH, "temp_output"),
     BATCH_SIZE=32,
@@ -176,11 +171,12 @@ def load_models() -> None:
     )
     models.msdd_model = NeuralDiarizer(cfg=create_config(configs.TEMP_PATH)).to(configs.DEVICE)
     models.punct_model = PunctuationModel(model="kredor/punctuate-all")
-    #print("end loading")
 
 
-# Isolate vocals from the rest of the audio
 def stemming(audio_file: str) -> str:
+    """
+    Isolate vocals from the rest of the audio
+    """
     vocal_tarjet = audio_file
     global configs
 
@@ -213,7 +209,7 @@ def nemo_process(audio_waveform, temp_path):
     #models.msdd_model.diarize()  #diarize all in temp_path
     torchaudio.save(
         os.path.join(temp_path, "mono_file.wav"),
-        audio_waveform.cpu().unsqueeze(0).float(),
+        torch.from_numpy(audio_waveform).unsqueeze(0).float(),
         16000,
         channels_first=True,
     )
@@ -251,7 +247,7 @@ def diarize(audio_file: str, lang: str, is_stemming: bool) -> str:
 
     emissions, stride = generate_emissions(
         models.alignment_model,
-        audio_waveform.to(models.alignment_model.dtype).to(models.alignment_model.device),
+        torch.from_numpy(audio_waveform).to(models.alignment_model.dtype).to(models.alignment_model.device),
         batch_size=configs.BATCH_SIZE,
     )
     # if torch.cuda.is_available():
@@ -279,14 +275,10 @@ def diarize(audio_file: str, lang: str, is_stemming: bool) -> str:
 
     if info.language in punct_model_langs:
         # restoring punctuation in the transcript to help realign the sentences
-
         words_list = list(map(lambda x: x["word"], wsm))
-
         labled_words = models.punct_model.predict(words_list, chunk_size=230)
-
         ending_puncts = ".?!"
         model_puncts = ".,;:!?"
-
         # We don't want to punctuate U.S.A. with a period. Right?
         is_acronym = lambda x: re.fullmatch(r"\b(?:[a-zA-Z]\.){2,}", x)
 
@@ -333,7 +325,6 @@ def send_results(plain_text: str, file_path: str, webhook:Webhook) -> bool:
     filename = os.path.basename(file_path)
     try:
         payload = TranscriptionResponse(text=plain_text.replace("\"", "\'"), filename=filename,token=webhook.token,metadata=webhook.metadata)
-        #req = requests.post(webhook.url, json={"text": plain_text.replace("\"", "\'"), "token": webhook.token, "metadata": webhook.metadata, "filename": filename})
         req = requests.post(webhook.url, json=payload.model_dump())
         req.raise_for_status()
     except requests.exceptions.RequestException as e:
@@ -382,7 +373,7 @@ def transcription_worker() -> None:
 
 async def cleanup_task(task_id: str) -> None:
     """
-    Remove task in queue and file in static directory
+    Remove task in queue and files in static directory
     """
     global  configs
     await asyncio.sleep(configs.TIME_TO_REMOVE)
@@ -448,7 +439,8 @@ async def transcribe_uri(params: TranscribeParamsUri, background_tasks: Backgrou
 
 
 @app.post("/transcribe/", tags=["processing"])
-def transcribe_audio_file(background_tasks: BackgroundTasks,  files:List[UploadFile]=File(description="Files to transcribe"), params:TranscribeParams=Body(...)) -> ReturnMessage:
+def transcribe_audio_file(background_tasks: BackgroundTasks,  files:List[UploadFile]=File(description="Files to transcribe"),
+                          params:TranscribeParams=Body(...)) -> ReturnMessage:
     """
     Transcribe audio files in **.mp3** or **.wav** into a .srt format.
     `TODO: Add support for other audio formats.`

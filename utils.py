@@ -1,10 +1,10 @@
+import logging
 import os
 import concurrent.futures
 import shutil
 from concurrent.futures import as_completed
 
 import requests
-from urllib.parse import urlparse
 import validators
 
 AUDIO_PATH = '/home/administrador/audio2'
@@ -18,16 +18,6 @@ def process_item(item):
     else:
         return None
 
-
-#def is_url(string):
-    # try:
-    #     #result = urlparse(string)
-    #     return all([result.scheme, result.netloc])
-    # except AttributeError:
-    #     return False
-
-
-
 def download_file(url):
     try:
         response = requests.get(url)
@@ -36,7 +26,8 @@ def download_file(url):
             with open(filename, 'wb') as file:
                 file.write(response.content)
             return filename
-    except requests.RequestException:
+    except requests.RequestException as e:
+        logging.error(f"Failed: There was an error downloading the file: {e}")
         pass
     return None
 
@@ -48,11 +39,11 @@ def write_file(file):
             try:
                 with open(audio_file, "wb") as buffer:
                     shutil.copyfileobj(file.file, buffer)
-                    return audio_file  # Retorna el archivo válido
             except Exception as e:
-                print(f"There was an error uploading the file: {e}")
+                logging.error(f"Failed: There was an error uploading the file: {e}")
             finally:
                 file.file.close()
+        return audio_file  # Retorna el archivo válido
     return None  # Retorna None si no es un archivo válido
 
 
