@@ -142,7 +142,7 @@ configs = Configs(
     TEMP_PATH=os.path.join(AUDIO_PATH, "temp_output"),
     BATCH_SIZE=32,
     DEVICE="cuda" if torch.cuda.is_available() else "cpu",
-    WHISPER_MODEL="deepdml/faster-whisper-large-v3-turbo-ct2",  #large-v3",
+    WHISPER_MODEL="mobiuslabsgmbh/faster-whisper-large-v3-turbo",  #large-v3",
     TIME_TO_REMOVE=259200 #3 days in seconds: 60 x 60 x 24 x 3
 )
 
