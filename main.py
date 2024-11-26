@@ -236,7 +236,7 @@ def diarize(audio_file: str, lang: str, is_stemming: bool) -> str:
         language,
         suppress_tokens=([-1]),  #no supress numeral
         batch_size=configs.BATCH_SIZE,
-        without_timestamps=True,
+        # without_timestamps=True,
     )
 
     full_transcript = "".join(segment.text for segment in transcript_segments)
@@ -382,6 +382,7 @@ async def cleanup_task(task_id: str) -> None:
     output_path = os.path.join(STATIC_PATH, basename_file)
     cleanup(output_path + ".srt")
     cleanup(output_path + ".txt")
+    logging.info("Files removed: " +output_path +".srt - " + output_path+".txt")
 
 @app.get("/", include_in_schema=False)
 def main():
