@@ -385,7 +385,7 @@ async def cleanup_task(task_id: str) -> None:
     logging.info("Files removed: " +output_path +".srt - " + output_path+".txt")
 
 @app.get("/", include_in_schema=False)
-def main():
+async def main():
     return RedirectResponse(url='/docs')
 
 @app.get("/status/", tags=["status"])
@@ -440,7 +440,7 @@ async def transcribe_uri(params: TranscribeParamsUri, background_tasks: Backgrou
 
 
 @app.post("/transcribe/", tags=["processing"])
-def transcribe_audio_file(background_tasks: BackgroundTasks,  files:List[UploadFile]=File(description="Files to transcribe"),
+async def transcribe_audio_file(background_tasks: BackgroundTasks,  files:List[UploadFile]=File(description="Files to transcribe"),
                           params:TranscribeParams=Body(...)) -> ReturnMessage:
     """
     Transcribe audio files in **.mp3** or **.wav** into a .srt format.
