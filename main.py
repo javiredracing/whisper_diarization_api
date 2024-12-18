@@ -181,7 +181,7 @@ def stemming(audio_file: str) -> str:
     global configs
 
     return_code = os.system(
-        f'python3 -m demucs.separate -n htdemucs --two-stems=vocals "{vocal_tarjet}" -o "{configs.TEMP_PATH}"'
+        f'python -m demucs.separate -n htdemucs --two-stems=vocals "{vocal_tarjet}" -o "{configs.TEMP_PATH}" --device "{configs.DEVICE}'
     )
 
     if return_code != 0:
@@ -475,6 +475,6 @@ async def transcribe_audio_file(background_tasks: BackgroundTasks,  files:List[U
 @app.webhooks.post("transcription_response")
 def new_transcription(body: TranscriptionResponse):
     """
-    It will send the srt transcription in plain text of the audio file  in a POST request to the URL that user provided in the transcribe webhook parameter settings.
+    It will send the srt transcription of the audio file, in plain text, in a POST request to the URL that user provided in the transcribe webhook parameter settings.
     """
     pass
